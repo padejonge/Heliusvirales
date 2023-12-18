@@ -1,0 +1,1613 @@
+---
+title: "Phylogeny and disease links of a widespread and ancient gut phage lineage"
+author: "P.A. de Jonge"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Loading packages
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+packages <- c("tidyverse", "viridis", "ggpubr", 
+              "vegan", "Biostrings", "phyloseq",
+              "microbiome", "RColorBrewer", "ggridges",
+              "genoPlotR", "gghalves", "ggtree")
+suppressPackageStartupMessages(lapply(packages, 
+                                      library, 
+                                      character.only=T, 
+                                      warn.conflicts=F, 
+                                      verbose=F))
+
+source("scripts/plot_theme.R")
+theme_set(PAdJ_theme())
+knitr::opts_chunk$set(cache = T)
+```
+
+# Figure 1
+
+## Figure 1a
+
+```{r echo=TRUE}
+
+genome <- "NatCom_15117"
+
+annotations <- 
+  rio::import("datatables/pharokka_cds_final_merged_output.tsv")
+
+annotation.df <-
+  rio::import("datatables/phynteny.tsv")
+
+DNA_segs <- 
+  as.dna_seg(annotation.df %>% 
+               mutate(fill = case_when(
+                 category_combined == "moron, auxiliary metabolic gene and host takeover" ~ "#ed9b40",
+                 category_combined == "transcription regulation" ~ "#8c5e5f",
+                 category_combined == "DNA, RNA and nucleotide metabolism" ~ "#5c1a1b",
+                 category_combined == "head and packaging" ~ "#335c67",
+                 category_combined == "connector" ~ "#708c94",
+                 category_combined == "other" ~ "grey60",
+                 category_combined == "tail" ~ "#192e33",
+                 category_combined == "lysis" ~ "#8d6b94"  
+               )) %>% 
+               transmute(name = ID,
+                         start = start,
+                         end = end,
+                         strand = strand,
+                         fill,
+                         color = "black"))
+
+plot_gene_map(dna_segs = list(DNA_segs), 
+              arrow_head_len = 500,
+              plot_new = T)
+
+```
+
+## Figure 1c
+
+### parsing hmmsearch results
+
+*An hmmsearch was done with an hmm-profile built from each of the nine marker genes from our earlier paper (<https://doi.org/10.1038/s41467-022-31390-5>) against contigs from seven phage databases.*
+
+| Database        | Contigs (all) | Contigs (25kbp) |
+|-----------------|--------------:|----------------:|
+| IMG/VR          |    15,722,824 |       1,128,039 |
+| GPD             |       142,809 |          84,491 |
+| CHVD            |        93,860 |          53,722 |
+| de Jonge (2022) |        63,481 |          19,157 |
+| MGV             |       358,455 |          18,860 |
+| GVD             |        33,242 |           6,769 |
+| RefSeq          |         4,220 |           3,950 |
+
+: phage database sizes
+
+```{r message=FALSE, warning=FALSE}
+setwd("analysis_output/hmm_output/")
+hmm_out_full <-
+  map_dfr(
+    list.files(),
+    function(hmm){
+      read_table(
+        hmm,
+        skip = 3,
+        col_names = F,
+        comment = '#',
+        show_col_types = F
+      ) %>%
+        transmute(
+          orfName = X1,
+          contigName = str_remove(X1, '_CDS_\\d+$'),
+          source = str_remove(X1, '_.+$'),
+          target = str_remove(X3, '_ali'),
+          bitscore = X9
+        ) %>%
+        filter(bitscore >= 50) %>%
+        group_by(contigName, target) %>%
+        slice_max(order_by = bitscore,
+                  n = 1,
+                  with_ties = F) %>%
+        ungroup()
+    }
+  )
+```
+
+### checkv output
+
+```{r, checkv}
+checkv <- rio::import("datatables/checkv_quality_summary.tsv")
+```
+
+### plot
+
+```{r, Fig1c}
+hist.df <-
+  hmm_out_full %>%
+    group_by(contigName) %>%
+    mutate(markers = n_distinct(target)) %>%
+    ungroup() %>%
+    filter(target == "00091",
+           contigName %in% subset(checkv, 
+                                  completeness == 100 & 
+                                    provirus == "No" & 
+                                    warnings == "")$contig_id)
+
+ggplot(data = hist.df,
+       aes(x = bitscore,
+           y = as.character(markers),
+           color = markers,
+           fill = markers)) +
+  geom_density_ridges(alpha = 0.1,
+                      jittered_points = TRUE, 
+                      point_size = 0.1,
+                      point_alpha = 0.1,
+                      bandwidth = 20) +
+  geom_vline(xintercept = 700,
+             color = "tomato3",
+             linetype = "dashed") +
+  theme(
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    legend.position = ""
+  ) +
+  xlab("TerL bitscore") +
+  ylab("marker genes in genome") +
+  scale_color_viridis() +
+  scale_fill_viridis() +
+  scale_y_discrete(expand = expansion(mult = c(0.01, .15))) +
+  scale_x_continuous(breaks = seq(0,1200, by = 200))
+```
+
+## Figure 1d
+
+### parse PC file
+
+```{r, PCs}
+PCs <-
+  read.table("datatables/heliusvirales_cluster.tsv",
+             header = F, sep = '\t') %>%
+  transmute(
+    PC = V1,
+    ORFname = V2,
+    contigName = str_remove(V2, "_CDS_\\d+$")
+  ) %>%
+  filter(ORFname != "")
+```
+
+recreate Supplementary Table 1
+
+```{r, PC_prevalence}
+PC_prevalence <- 
+  tibble(PCs) %>% 
+  left_join(annotations[,c(1,22)],
+            by = c("ORFname"="gene")) %>% 
+  group_by(PC) %>% 
+  mutate(contigs = n_distinct(contigName)) %>% 
+  group_by(PC, contigs, annot) %>% 
+  reframe(annot_contig = n_distinct(contigName)) %>% 
+  select(PC, contigs, annot, annot_contig) %>% 
+  distinct() %>% 
+  arrange(-annot_contig) %>% 
+  group_by(PC) %>% 
+  mutate(
+    best_annot = case_when(
+      n() == 1 ~ annot, 
+      dplyr::first(annot) != "hypothetical protein" ~ dplyr::first(annot),
+      dplyr::first(annot) == "hypothetical protein" ~ dplyr::nth(annot,2),
+      TRUE ~ "none")
+    ) %>% 
+  ungroup() %>% 
+  select(PC, contigs, best_annot) %>% 
+  distinct() %>% 
+  arrange(-contigs) %>% 
+  mutate(
+    ref_gene = PC,
+    PC = paste("PC", row_number(), sep = "_")
+  ) %>% 
+  left_join(rio::import("datatables/deJonge_PCs.tsv"), by = "PC")
+```
+
+### plot
+
+```{r, Fig1d}
+rbind(
+  PC_prevalence %>% 
+  slice_max(contigs, n = 14) 
+  ,
+  PC_prevalence %>% 
+    filter(!is.na(deJonge2022_marker_gene))
+) %>% 
+  distinct() %>% 
+  mutate(group = ifelse(is.na(deJonge2022_marker_gene),
+                        "others", "marker_gene")) %>% 
+  ggdotchart(
+    x = "PC",
+    y = "contigs", 
+    add = "segment",
+    add.params = list(color = "grey",
+                      size = 2),
+    dot.size = 4,
+    rotate = T,
+    sorting = "desc",
+    color = "group",
+    palette = c("tomato3",
+                "grey40"),
+    ggtheme = PAdJ_theme()
+  ) +
+  theme(#axis.text.y = element_blank(),
+        panel.grid.major.y = element_blank())
+```
+
+# Figure 2
+
+## Figure 2b
+
+## load data
+
+```{r}
+#| warning: false
+
+source("scripts/Fig_2B.R")
+```
+
+## plot
+
+```{r}
+cowplot::plot_grid(plot_1, plot_2, 
+                   ncol = 1, align = "vh", 
+                   rel_heights = c(0.25,1))
+```
+
+# Figure 3
+
+## Figure 3a
+
+```{r message=FALSE, warning=FALSE}
+suppressWarnings(source("scripts/TerL_parsing.R"))
+```
+
+### plot
+
+```{r, Fig3a}
+origins %>%
+  inner_join(helius_groups, by = join_by(contigName)) %>%
+  group_by(Family, Subfamily, Origin_simple) %>%
+  reframe(contigs = n()) %>%
+  mutate(Lineage = paste(
+    str_replace(Family, "_", " "),
+    str_replace(Subfamily, "_", " "),
+    sep = ";"
+  )) %>%
+  filter(!Lineage %in% c("unclassified Heliusvirales;unclassified Heliusvirales",
+                         "Utuviridae;unclassified Utuviridae")) %>% 
+  ggbarplot(
+    x = "Lineage",
+    fill = "Origin_simple",
+    y = "contigs",
+    rotate = T,
+    palette = c(
+      "#4DAF4A",
+      "#E41A1C",
+      "#925E9F",
+      "#377EB8",
+      "grey40",
+      "#EFC000",
+      "#ff9cd6",
+      "#db67ab",
+      "grey"
+    ),
+    ggtheme = PAdJ_theme(),
+    ylab = "number of contigs"
+  ) +
+  scale_y_continuous(expand = c(0, 0.3)) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "right"
+  ) +
+  guides(fill = guide_legend("Genome origin"))
+```
+
+### cleanup
+
+```{r, cleanup}
+rm(hmm_out_full, annotation.df, DNA_segs, hist.df, PC_prevalence)
+```
+
+## Figure 3b
+
+```{r, host_parsing}
+iphop_hosts <- 
+  rio::import("datatables/Host_prediction_to_genus_m90.csv", 
+              setclass = "tibble") %>% 
+  transmute(
+    Virus,
+    Host_tax = `Host genus`,
+    Confidence = `Confidence score`
+  ) %>% 
+  right_join(helius_groups[,c(1:4)],
+             by = c("Virus"="contigName")) %>% 
+  separate_wider_delim(Host_tax, 
+                       ";", 
+                       names = c("H_Domain",
+                                 "H_Phylum",
+                                 "H_Class",
+                                 "H_Order",
+                                 "H_Family",
+                                 "H_Genus")) %>% 
+  mutate(across(starts_with("H_"), 
+                ~replace_na(., 
+                            "unknown")),
+         across(starts_with("H_"), 
+                ~str_remove(., 
+                            ".__")),
+         H_Family = ifelse(H_Family == "", 
+                           paste("unknown",
+                                 H_Order, 
+                                 sep = "_"), 
+                           H_Family),
+         H_Genus = ifelse(H_Genus == "", 
+                          paste("unknown", 
+                                H_Family,
+                                sep = "_"), 
+                          H_Genus),
+         Lineage = paste(Family, 
+                         Subfamily, 
+                         sep = ";")) 
+
+most_common_families <- 
+  iphop_hosts %>% 
+  mutate(H_lineage = paste(H_Phylum, H_Family)) %>% 
+  group_by(H_lineage) %>% 
+  reframe(genomes = n_distinct(Virus)) %>% 
+  arrange(-genomes) %>% 
+  filter(H_lineage != "unknown unknown") %>% 
+  slice_max(genomes, n = 10)
+
+colors_hosts <- 
+  c("#7CAF89",
+    "#d4b7b7",
+    "#9b5758",
+    "#a87eb3",
+    "#c9afcf",
+    "#e9dfec",
+    "#afa4bd",
+    "#ebe8ee",
+    "#ffffff",
+    "#ecb965",
+    "#277B3D",
+    "#710F11",
+    "#935FA0",
+    "#E59B24",
+    "#69C9CA",
+    "grey30",
+    "grey80"
+    )
+
+names(colors_hosts) <- 
+  c("Actinobacteriota Actinomycetaceae",
+    "Firmicutes Enterococcaceae",
+    "Firmicutes Streptococcaceae",
+    "Firmicutes_A Acutalibacteraceae",
+    "Firmicutes_A CAG-74",
+    "Firmicutes_A Clostridiaceae",
+    "Firmicutes_A Lachnospiraceae",
+    "Firmicutes_A Oscillospiraceae",
+    "Firmicutes_A Ruminococcaceae",
+    "Firmicutes_C Acidaminococcaceae",
+    "Actinobacteriota (other)",
+    "Firmicutes (other)",
+    "Firmicutes_A (other)",
+    "Firmicutes_C (other)",
+    "Proteobacteria (other)",
+    "x_others",
+    "x_unknown")
+```
+
+### plot
+
+```{r, Fig3b}
+iphop_hosts %>% 
+  mutate(H_lineage = paste(H_Phylum, H_Family),
+         H_lineage = case_when(
+           H_lineage %in% most_common_families$H_lineage ~ H_lineage, 
+           H_lineage == "unknown unknown" ~ "x_unknown",
+           startsWith(H_lineage, "Firmicutes_A") ~ "Firmicutes_A (other)",
+           startsWith(H_lineage, "Firmicutes_C") ~ "Firmicutes_C (other)",
+           startsWith(H_lineage, "Firmicutes") ~ "Firmicutes (other)",
+           startsWith(H_lineage, "Actinobacteriota") ~ "Actinobacteriota (other)",
+           startsWith(H_lineage, "Proteobacteria") ~ "Proteobacteria (other)",
+           TRUE ~ "x_others")) %>% 
+  group_by(Lineage, H_lineage) %>% 
+  reframe(genomes = n_distinct(Virus)) %>% 
+  filter(!str_remove(Lineage, ".+;") %in% c("unclassified_Heliusvirales",
+                                            "unclassified_Utuviridae",
+                                            "unclassified_Hathorviridae",
+                                            "unclassified_Aineviridae")) %>% 
+  ggbarplot(x = "Lineage", 
+            fill = "H_lineage",
+            palette = colors_hosts, 
+            y = "genomes", 
+            rotate = T,
+            ggtheme = PAdJ_theme(),
+            ylab = "number of contigs") +
+  theme(legend.position = "right",
+        panel.grid.major.y = element_blank())
+```
+
+## Figure 3c
+
+### load data
+
+```{r, AMG_parsing}
+AMG_pathways <- 
+  rio::import("datatables/AMGs/VIBRANT_AMG_pathways_all_heliusviridae.tsv")
+
+AMG_genome <- 
+  rio::import("datatables/AMGs/VIBRANT_AMG_individuals_all_heliusviridae.tsv")
+
+KO_pathway <-
+  AMG_pathways %>%
+  select(-`Total AMGs`) %>%
+  separate(
+    col = `Present AMG KOs`,
+    sep = ",",
+    into = paste("KO", c(1:19), sep = ""),
+    fill = "right"
+  ) %>%
+  pivot_longer(cols = -c(1:3), values_to = "KO") %>%
+  select(-name) %>%
+  filter(!is.na(KO))
+
+total <-
+  helius_groups %>% 
+  mutate(Subfamily = paste(Family, Subfamily, sep = ";")) %>% 
+  group_by(Subfamily) %>% 
+  summarise(total = n())
+```
+
+### plot
+
+```{r, Fig3c}
+
+```
+
+# Figure 4
+
+## Figure 4a
+
+```{r, Fig4a}
+world_map <- 
+  map_data("world") %>% 
+  filter(! long > 180)
+
+countries  <-
+  world_map %>%
+  distinct(region)
+
+origins %>% 
+  mutate(Origin = ifelse(startsWith(Origin, "Human"), "Human", "non-human"),
+         country_detected = case_when(
+           country_detected == "United Kingdom" ~ "UK",
+           country_detected == "United States" ~ "USA",
+           TRUE ~ country_detected
+         )) %>% 
+  group_by(country_detected) %>% 
+  summarise(category = case_when(
+    !"Human" %in% c(Origin) ~ "only non-human",
+    !"non-human" %in% c(Origin) ~ "only Human",
+    TRUE ~ "both Human and non-human"
+  )) %>% 
+  full_join(countries,
+            by = c("country_detected" = "region")) %>%
+  mutate(category = replace_na(category, "none detected/no data"),
+         category = factor(category, 
+                           levels = c("only Human", 
+                                      "only non-human", 
+                                      "both Human and non-human", 
+                                      "none detected/no data"))) %>% 
+  ggplot(aes(fill = category,
+             map_id = country_detected)) +
+  geom_map(map = world_map, 
+           color = "white", 
+           linewidth = 0.1) +
+  expand_limits(x = world_map$long,
+                y = world_map$lat) +
+  coord_map("moll") +
+  ggthemes::theme_map() +
+  scale_fill_manual(values = c("#7f9fad", "#bc5090", "#003f5c", "grey40"))
+```
+
+## Figure 4b
+
+### load data
+
+```{r}
+#| output: false
+source("scripts/pasolli_parsing.R")
+```
+
+```{r}
+rbind(
+    pasolli_TerL %>% 
+        group_by(Study) %>% 
+        summarise(prevalence = 
+                    round(n_distinct(Subject[diversity > 0])/n_distinct(Subject), 
+                          3),
+                  total = 
+                    n_distinct(Subject[diversity > 0])) %>% 
+        ungroup(),
+    pasolli_TerL %>% 
+        summarise(prevalence = 
+                    round(n_distinct(Subject[diversity > 0])/n_distinct(Subject), 
+                          3),
+                  total = n_distinct(Subject[diversity > 0])) %>% 
+        mutate(Study = "Overall")) %>% 
+    ggdotchart(
+        x = "Study",
+        y = "prevalence",
+        ggtheme = PAdJ_theme(),
+        rotate = T,
+        add = "segment",
+        ylab = "individuals with Heliusvirales",
+        xlab = "Study",
+        size = 2,
+        dot.size = 6.5,
+        label = "total",
+        font.label = list(color = "white", size = 8, 
+                          vjust = 0.4),
+        color = "#FC4E07"
+    ) +
+    scale_y_continuous(labels = scales::label_percent(),
+                       breaks = seq(0,1,by = 0.1)) +
+    theme(panel.grid.major.y = element_blank())
+```
+
+## Figure 4c
+
+```{r}
+#| warning: false
+
+tree <- 
+  treeio::read.beast("analysis_output/combined_ann.tree")
+
+ggtree(tree,
+       mrsd = "2023-01-01",
+       size = 1) +
+  geom_range(
+    "CAheight_0.95_HPD",
+    color = 'steelblue3',
+    size = 2,
+    alpha = 0.5) +
+  geom_label2(aes(
+    label = round(as.numeric(CAheight_mean), 0),
+    subset = as.numeric(CAheight_mean) > 100,
+    x = branch),
+    vjust = -0.5, 
+    label.padding = unit(0.1, "lines"),
+    size = 3, 
+    label.size = 0,
+    label.r = unit(0, "lines")) +
+  geom_cladelabel(19, 
+                  label = "Mataharivirinae", 
+                  offset = 100000, 
+                  offset.text = 5000,
+                  barsize = 2,
+                  color = "#993333") + 
+  geom_cladelabel(27, 
+                  label = "Ravirinae", 
+                  offset = 100000, 
+                  offset.text = 5000,
+                  barsize = 2,
+                  color = "#cc9999") + 
+  geom_tiplab(size = 2) +
+  theme_tree2() +
+  theme(panel.grid.major.x = element_line(linetype = 'dashed',
+                                          color = "#D9D9D9")) +
+  scale_x_continuous(breaks = seq(0,-100000, by = -25000),
+                     labels = c(0, 25,50,75,100),
+                     expand = c(0.15, 0),
+                     name = "time (thousands of years)") 
+```
+
+## Figure 4d
+
+```{r}
+ancient_hg.df <- 
+  TerL.df %>% 
+  mutate(
+    Study = case_when(
+      Study == "ancient" & startsWith(Sample, "SAMEA") ~ "Maixner_2021",
+      Sample == "Otzi" ~ "Maixner_2016",
+      Study == "ancient" & country != "AUT" ~ "Wibowo_2021",
+      TRUE~Study
+    )) %>% 
+  filter(Study %in% c("RampelliS_2015", 
+                      "Obregon-TitoAJ_2015", 
+                      "Wibowo_2021", 
+                      "Maixner_2021", 
+                      "Maixner_2016")) %>% 
+  mutate(lifestyle = 
+           case_when(
+             Study == "Obregon-TitoAJ_2015" & startsWith(Sample, "HC") ~ 
+               "rural_agricultural",
+             Study == "Obregon-TitoAJ_2015" & startsWith(Sample, "SM") ~ 
+               "hunter_gatherer",
+             Study == "Obregon-TitoAJ_2015" & startsWith(Sample, "NO") ~ 
+               "urban",
+             Study == "RampelliS_2015" & startsWith(Sample, "I") ~ 
+               "urban",
+             Study == "RampelliS_2015" & startsWith(Sample, "H") ~ 
+               "hunter_gatherer",
+             TRUE~"ancient")) %>% 
+  filter(lifestyle != "rural_agricultural")
+```
+
+### significance ca
+
+```{r, Fig4d_sign}
+ancient_lme <- 
+  map_dfr(
+    list(
+      c("ancient", "hunter_gatherer"),
+      c("ancient", "urban"),
+      c("hunter_gatherer", "urban")
+    ) ,
+    function(combo){
+      ancient_hg.df %>% 
+        filter(lifestyle %in% combo) %>% 
+        nlme::lme(
+        fixed = diversity~lifestyle,
+        random = ~1|Study
+    ) %>% 
+        rstatix::Anova() %>% 
+        rstatix::anova_summary() %>% 
+        mutate(group1 = combo[[1]],
+               group2 = combo[[2]])
+    }
+  ) %>% 
+  mutate(p.adj.lme = p.adjust(p, method = "BH")) %>% 
+  select("group1", "group2", "p.adj.lme")
+  
+ancient_hg.df_sign <-
+  ancient_hg.df %>%
+  rstatix::wilcox_test(diversity ~ lifestyle,
+                       p.adjust.method = "BH") %>%
+  rstatix::add_xy_position(fun = "max") %>%
+  select(group1, group2, y.position) %>% 
+  left_join(ancient_lme, by = join_by(group1, group2)) %>% 
+  mutate(p.adj.signif = case_when(
+    p.adj.lme > 0.05 ~ "ns",
+    between(p.adj.lme, 0.01, 0.05) ~ "*",
+    between(p.adj.lme, 0.01, 0.001) ~ "**",
+    between(p.adj.lme, 0.001, 0.0001) ~ "***",
+    p.adj.lme < 0.0001 ~ "****"
+  )) 
+```
+
+### plot
+
+```{r, Fig4d}
+ancient_hg.df %>% 
+  ggboxplot(
+    y = "diversity",
+    x = "lifestyle",
+    ggtheme = PAdJ_theme(),
+    add = "jitter",
+    add.params = list(width = 0.1),
+    ylab = "observed Heliusvirales TerL genes/person/1B bases",
+    xlab = "population",
+    color = "lifestyle",
+    palette = get_palette("jama", 5),
+    width = 0.5
+  ) +
+  stat_pvalue_manual(ancient_hg.df_sign,
+                     label = "p.adj.lme", 
+                     tip.length = 0.01, 
+                     size = 5, 
+                     hide.ns = F) +
+  theme(panel.grid.major.x = element_blank(),
+        legend.position = "") +
+  scale_x_discrete(limits = c("ancient", 
+                              "hunter_gatherer",
+                              "urban"))
+```
+
+## Figure 4e
+
+### data
+
+```{r message=FALSE, warning=FALSE}
+source("scripts/ancient_tree.R")
+```
+
+### plot
+
+```{r, Fig4e}
+plot_ordination(physeq = ancient.ps,
+                ordination = PCA,
+                justDF = T) %>%
+  ggscatter(
+    x = "NMDS1",
+    y = "NMDS2",
+    color = "lifestyle",
+    ggtheme = PAdJ_theme(),
+    size = 1.5,
+    mean.point = T,
+    mean.point.size = 4,
+    ellipse = T,
+    ellipse.alpha = 0.1,
+    ellipse.level = 0.5,
+    star.plot = F,
+    star.plot.lty = "dashed",
+    star.plot.lwd = 0.5,
+    palette = get_palette("nejm", 3),
+  ) +
+  theme(
+    aspect.ratio = 1,
+    panel.border = element_rect(color = "#969696", linewidth = 1),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.text.y = element_text(size = 10)
+  ) +
+  guides(color = guide_legend(override.aes = list(alpha = 1)))
+```
+
+### significance
+
+#### PERMANOVA - urban vs hg
+
+```{r message=FALSE, warning=FALSE}
+ps <-
+    subset_samples(ancient.ps, 
+                   lifestyle != "ancient")
+
+dist_mat <- phyloseq::distance(ps, "unifrac")
+
+set.seed(20230711)
+adonis2(formula = dist_mat~lifestyle,
+        data = data.frame(ps@sam_data), 
+        permutations = 9999)
+
+rm(ps,dist_mat)
+```
+
+#### PERMANOVA - urban vs ancient
+
+```{r message=FALSE, warning=FALSE}
+ps <-
+    subset_samples(ancient.ps, 
+                   lifestyle != "hunter_gatherer")
+
+dist_mat <- phyloseq::distance(ps, "unifrac")
+
+set.seed(20230711)
+adonis2(formula = dist_mat~lifestyle,
+        data = data.frame(ps@sam_data), 
+        permutations = 9999)
+
+rm(ps,dist_mat)
+```
+
+#### PERMANOVA - hg vs ancient
+
+```{r message=FALSE, warning=FALSE}
+ps <-
+    subset_samples(ancient.ps, 
+                   lifestyle != "urban")
+
+dist_mat <- phyloseq::distance(ps, "unifrac")
+
+set.seed(20230711)
+adonis2(formula = dist_mat~lifestyle,
+        data = data.frame(ps@sam_data), 
+        permutations = 9999)
+
+rm(ps,dist_mat)
+```
+
+## Figure 4f
+
+### data wrangling
+
+```{r message=FALSE, warning=FALSE}
+ancient_ab.ps <-
+  phyloseq(
+    unifrac_data %>%
+      group_by(contigName, sample) %>%
+      reframe(mapped = sum(mapped)) %>%
+      left_join(read_count, by = join_by(sample)) %>%
+      mutate(mapped = mapped/reads_tot) %>%
+      select(-reads_tot) %>%
+      pivot_wider(
+        names_from = contigName,
+        values_from = mapped,
+        values_fill = 0
+      ) %>%
+      column_to_rownames("sample") %>%
+      otu_table(taxa_are_rows = F)
+
+    ,
+    distinct(unifrac_data[,c(4, 7)]) %>%
+      left_join(distinct(ancient_abundance.df[,c(1:3)]),
+                by = join_by(sample)) %>%
+      mutate(samplename = sample) %>%
+      column_to_rownames("sample") %>%
+      sample_data(),
+
+    ape::as.phylo(ancient_unifrac_tree),
+
+    ancient_tree_families_ORFname %>%
+      column_to_rownames("contigName") %>%
+      as.matrix() %>%
+      tax_table()
+  )
+
+ancient_lineage.df <- 
+  unifrac_data[,c(1,2,3,4)] %>% 
+  left_join(read_count, by = join_by(sample)) %>% 
+  left_join(ancient_tree_families_ORFname, by = join_by(contigName)) %>% 
+  mutate(lineage = paste(Family, Subfamily, sep = ";")) %>% 
+  select(contigName, contigLen, mapped, sample, reads_tot, lineage) %>% 
+  tibble() %>% 
+  group_by(lineage, sample) %>% 
+  reframe(present = ifelse(mapped > 0, 1, 0)) %>% 
+  distinct() %>% 
+  rbind(tidyr::expand_grid(
+    sample = 
+      subset(ancient_abundance.df[,c(1,3)], 
+             !sample %in% psmelt2(ancient_ab.ps)$samplename)$sample,
+    lineage = 
+      unique((helius_groups %>%
+                mutate(lineage = paste(Family,
+                                       Subfamily,
+                                       sep = ";")))$lineage),
+    present = 0)) %>% 
+  pivot_wider(names_from = sample, values_from = present, values_fill = 0) %>% 
+  pivot_longer(-1, names_to = "sample", values_to = "present") %>% 
+  left_join(ancient_abundance.df[,c(1:3)], by = c("sample")) %>% 
+  filter(!lineage %in% c("Hathorviridae;unclassified_Hathorviridae",
+                         "unclassified_Heliusvirales;unclassified_Heliusvirales",
+                         "Utuviridae;unclassified_Utuviridae",
+                         "Aineviridae;unclassified_Aineviridae"))
+
+ancient_lineage.df_sign <- 
+  map(
+    unique(ancient_lineage.df$lineage),
+    function(tax){
+      ancient_lineage.df %>% 
+        group_by(lineage, lifestyle) %>% 
+        reframe(present = n_distinct(sample[present == 1]),
+                absent = n_distinct(sample)-present) %>% 
+        filter(lineage == tax) %>% 
+        select(-lineage) %>% 
+        column_to_rownames("lifestyle") %>% 
+        rstatix::pairwise_fisher_test(p.adjust.method = "BH") %>% 
+        mutate(lineage = tax)
+    }
+  ) %>% 
+  list_rbind()
+```
+
+### plot
+
+```{r}
+ancient_lineage.df %>% 
+    mutate(Family = str_remove(lineage, ";.+")) %>% 
+ggplot(aes(x = sample,
+           y = lineage,
+           fill = as.character(present))) +
+    geom_tile() +
+    facet_grid(Family~lifestyle, scales = "free", space="free") + 
+    scale_fill_manual(values = c("grey70","tomato3")) +
+    PAdJ_theme() +
+    theme(axis.text.x = element_blank(),
+          panel.grid.major = element_blank())
+```
+
+### significance
+
+```{r}
+ancient_combinations <- 
+  expand_grid(Sample = ancient_lineage.df$sample, lineage = ancient_lineage.df$lineage)
+
+lineages <- 
+  helius_groups %>% 
+  mutate(lineage = paste(Family, 
+                           Subfamily, 
+                           sep = ";")) %>% 
+  filter(!lineage %in% c(
+    "unclassified_Heliusvirales;unclassified_Heliusvirales",
+    "Utuviridae;unclassified_Utuviridae",
+    "Hathorviridae;unclassified_Hathorviridae")
+    )
+
+map_dfr(
+  unique(lineages$lineage),
+  function(tax){
+    subset(ancient.df, !startsWith(Sample, "HCO")) %>%
+      mutate(Origin = str_remove(Origin, " .+$"),
+             lineage = paste(Family, Subfamily, sep = ";")) %>%
+      select(Sample, Origin, count, lineage) %>%
+      right_join(ancient_combinations, by = join_by(Sample, lineage)) %>%
+      distinct() %>%
+      mutate(
+        count = replace_na(count, 0),
+        Origin = case_when(
+          str_extract(Sample, "^...") %in% c("SRR", "ERR", "Otzi") ~ "Ancient",
+          str_remove(Sample, "\\d+$") %in% c("H", "SM") ~ "Hunter-gatherer",
+          TRUE ~ "Urban"
+        )
+      ) %>%
+      filter(lineage == tax) %>% 
+      group_by(Origin) %>%
+      summarise(present = n_distinct(Sample[count > 0]),
+                absent = n_distinct(Sample[count == 0])) %>%
+      ungroup() %>%
+      column_to_rownames("Origin") %>%
+      rstatix::pairwise_fisher_test() %>%
+      mutate(lineage = tax)
+  }
+) 
+```
+
+# Figure 5
+
+## Figure 5a
+
+### data_wrangling
+
+```{r}
+pasolli_TerL <-
+  pasolli %>%
+  mutate(study_name = ifelse(startsWith(study_name, "CM"), 
+                             "PasolliE_2019", 
+                             study_name)) %>%
+  left_join(sampleMetadata[, c(1, 2, 18)], 
+            by = join_by(sample_id, study_name)) %>%
+  group_by(sample_id, study_name) %>%
+  summarise(richness = n_distinct(ORFName) / max(number_bases) * 1e9) %>%
+  ungroup() %>%
+  right_join(sampleMetadata, by = join_by(sample_id, study_name)) %>%
+  mutate(richness = ifelse(is.na(richness), 
+                           0, 
+                           richness))
+```
+
+### plot
+
+```{r}
+plots <- 
+  map(c("LiJ_2014", "NielsenHB_2014", "QinJ_2012", "QinN_2014"), 
+      function(study){
+        if(study == "LiJ_2014"){
+          conditions = c("control", "T1D")
+        } else if(study == "NielsenHB_2014"){
+          conditions = c("control", "IBD")
+        } else if(study == "QinJ_2012"){
+          conditions = c("control", "T2D")
+        } else if(study == "QinN_2014"){
+          conditions = c("control", "cirrhosis")
+        }
+        
+        pasolli_TerL %>%
+          filter(body_site == "stool",
+                 study_name == study, 
+                 study_condition %in% conditions) %>% 
+          group_by(study_condition, study_name, subject_id) %>% 
+          summarise(richness = sum(richness)) %>% 
+          ungroup() %>% 
+          mutate(study_condition = factor(study_condition, 
+                                          levels = conditions)) %>% 
+          ggboxplot(
+            x = "study_condition",
+            y = "richness",
+            add = "jitter",
+            add.params = list(size = 0.25),
+            ggtheme = PAdJ_theme(),
+            xlab = "",
+            ylab = "observed TerL/person/1B bases",
+            facet.by = "study_name",
+            color = "study_condition",
+            palette = c("#5D3A9B","#E66100")
+          ) +
+          stat_compare_means(comparisons = list(conditions), 
+                             label = "p.format") +
+          theme(legend.position = "")})
+
+cowplot::plot_grid(
+  plots[[1]],
+  plots[[2]],
+  plots[[3]],
+  plots[[4]]
+)
+```
+
+## Figure 5b
+
+```{r message=FALSE, warning=FALSE}
+map(
+  c("LiJ_2014", "NielsenHB_2014", "QinJ_2012", "QinN_2014") ,
+  function(project){
+    
+    tree <- 
+      ape::read.tree(paste("datatables/Trees/", 
+                           project, 
+                           "_unifrac.treefile", 
+                           sep = ""))
+    
+    tree <- 
+      ape::root(tree, outgroup = "IMGVR_9015416")
+    
+    unifrac_data <- 
+      rio::import(paste("datatables/", project, "_depth.tsv", sep = ""))[,-6] %>% 
+      mutate(present = ifelse(coverage >= 0.5, "yes", "no")) %>% 
+      filter(contigName != "*",
+             present == "yes")
+    
+    ps <-
+      phyloseq(
+        unifrac_data %>%
+          select(contigName, sample, mapped) %>% 
+          mutate(mapped = 1) %>% 
+          distinct() %>% 
+          pivot_wider(
+            names_from = contigName,
+            values_from = mapped,
+            values_fill = 0
+          ) %>%
+          column_to_rownames("sample") %>%
+          otu_table(taxa_are_rows = F)
+        
+        ,
+        distinct(unifrac_data[,c(4, 6)]) %>% 
+          left_join(distinct(sampleMetadata[,c(2,3,6,7)]),
+                    by = c("sample"="sample_id")) %>% 
+          mutate(samplename = sample) %>%
+          column_to_rownames("sample") %>%
+          sample_data(),
+        
+        ape::as.phylo(tree),
+        
+        data.frame(cophenetic(tree)) %>%
+          rownames_to_column("contigName1") %>%
+          pivot_longer(-1, names_to = "contigName2", values_to = "distance") %>%
+          inner_join(helius_groups, 
+                     by = c("contigName1" = "contigName")) %>%
+          group_by(contigName2) %>%
+          slice_min(distance, n = 1, with_ties = F) %>%
+          ungroup() %>%
+          transmute(
+            contigName = contigName2,
+            Family = Family,
+            Subfamily = Subfamily
+          ) %>% 
+          distinct() %>% 
+          column_to_rownames("contigName") %>% 
+          as.matrix() %>% 
+          tax_table()
+      )
+    
+    dist_mat <- phyloseq::distance(ps, "unifrac", weighted = F)
+    
+    sign <- 
+      adonis2(formula = dist_mat~disease,
+              data = data.frame(ps@sam_data), 
+              permutations = 9999)
+    
+    PCA <- ordinate(ps, method = "NMDS", distance = "unifrac", weighted = F)
+    
+    plot <-
+      plot_ordination(physeq = ps,
+                      ordination = PCA,
+                      justDF = T) %>%
+      ggscatter(
+        x = "NMDS1",
+        y = "NMDS2",
+        color = "study_condition",
+        ggtheme = PAdJ_theme(),
+        size = 1.5,
+        #alpha = 0.5,
+        mean.point = T,
+        mean.point.size = 4,
+        ellipse = T,
+        ellipse.alpha = 0.1,
+        ellipse.level = 0.5,
+        star.plot = F,
+        star.plot.lty = "dashed",
+        star.plot.lwd = 0.5,
+        palette = get_palette("nejm", 3),
+        title = paste(project, sign$`Pr(>F)`[1])
+      ) +
+      theme(
+        aspect.ratio = 1,
+        panel.border = element_rect(color = "#969696", size = 1),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_text(size = 10)
+      ) +
+      guides(color = guide_legend(override.aes = list(alpha = 1)))
+    
+    # print(plot)
+    
+  } 
+)
+```
+
+## Figure 5c
+
+```{r message=FALSE, warning=FALSE}
+map(
+  c("LiJ_2014", "NielsenHB_2014", "QinJ_2012", "QinN_2014") ,
+  function(project){
+    
+    tree <- 
+      ape::read.tree(paste("datatables/Trees/", 
+                           project, 
+                           "_unifrac.treefile", 
+                           sep = ""))
+    
+    tree <- 
+      ape::root(tree, outgroup = "IMGVR_9015416")
+    
+    unifrac_data <- 
+      rio::import(paste("datatables/", project, "_depth.tsv", sep = ""))[,-6] %>% 
+      mutate(present = ifelse(coverage >= 0.5, "yes", "no")) %>% 
+      filter(contigName != "*",
+             present == "yes")
+    
+    ps <-
+      phyloseq(
+        unifrac_data %>%
+          select(contigName, sample, mapped) %>% 
+          mutate(mapped = 1) %>% 
+          distinct() %>% 
+          pivot_wider(
+            names_from = contigName,
+            values_from = mapped,
+            values_fill = 0
+          ) %>%
+          column_to_rownames("sample") %>%
+          otu_table(taxa_are_rows = F)
+        
+        ,
+        distinct(unifrac_data[,c(4, 6)]) %>% 
+          left_join(distinct(sampleMetadata[,c(2,3,6,7)]),
+                    by = c("sample"="sample_id")) %>% 
+          mutate(samplename = sample) %>%
+          column_to_rownames("sample") %>%
+          sample_data(),
+        
+        ape::as.phylo(tree),
+        
+        data.frame(cophenetic(tree)) %>%
+          rownames_to_column("contigName1") %>%
+          pivot_longer(-1, names_to = "contigName2", values_to = "distance") %>%
+          inner_join(helius_groups, 
+                     by = c("contigName1" = "contigName")) %>%
+          group_by(contigName2) %>%
+          slice_min(distance, n = 1, with_ties = F) %>%
+          ungroup() %>%
+          transmute(
+            contigName = contigName2,
+            Family = Family,
+            Subfamily = Subfamily
+          ) %>% 
+          distinct() %>% 
+          column_to_rownames("contigName") %>% 
+          as.matrix() %>% 
+          tax_table()
+      )
+    
+    data <- 
+      rbind(plots[[1]]$data, 
+            plots[[2]]$data, 
+            plots[[3]]$data, 
+            plots[[4]]$data)
+    
+     present <- 
+       psmelt(ps) %>% 
+       group_by(Sample, study_condition, Subfamily) %>% 
+       reframe(present = ifelse(sum(Abundance) > 0, 1, 0))
+     
+     absent <- 
+       data.frame(
+         Sample = subset(data, 
+                         study_name == project &
+                           !subject_id %in% present$Sample)$subject_id,
+         study_condition = subset(data, 
+                                  study_name == project &
+                                    !subject_id %in% 
+                                    present$Sample)$study_condition,
+         present = 0,
+         Subfamily = "Ravirinae"
+         )
+     df <- 
+       rbind(present,
+           absent) %>%
+       pivot_wider(names_from = Subfamily,
+                   values_from = present,
+                   values_fill = 0) %>%
+       pivot_longer(-c(1, 2), 
+                    names_to = "Subfamily", 
+                    values_to = "present") %>% 
+       group_by(study_condition, Subfamily) %>% 
+       reframe(present = n_distinct(Sample[present == 1]),
+               absent = n_distinct(Sample)-present,
+               fraction = present/(present+absent)) %>% 
+       mutate(study_condition = ifelse(
+         study_condition == "control", "control", "disease"
+       ))
+     
+     plot <- 
+       rbind(present,
+           absent) %>%
+       pivot_wider(names_from = Subfamily,
+                   values_from = present,
+                   values_fill = 0) %>%
+       pivot_longer(-c(1, 2), 
+                    names_to = "Subfamily", 
+                    values_to = "present") %>% 
+       group_by(study_condition, Subfamily) %>% 
+       reframe(present = n_distinct(Sample[present == 1]),
+               absent = n_distinct(Sample)-present,
+               fraction = present/(present+absent)) %>% 
+       select(study_condition, Subfamily, fraction) %>% 
+       mutate(study_condition = ifelse(
+         study_condition == "control", "control", "disease"
+       )) %>% 
+       pivot_wider(names_from = study_condition, values_from = fraction) %>% 
+       mutate(delta = (disease - control)/(disease + control),
+              proj = project) %>% 
+       ggplot(aes(x = proj,
+                  y = Subfamily,
+                  fill = delta)) +
+       geom_tile() +
+       scale_fill_gradient2(limits = c(-1,1), 
+                            low = "#762a83",
+                            mid = "#f7f7f7",
+                            high = "#1b7837") +
+       PAdJ_theme() +
+       theme(panel.grid.major = element_blank(),
+             axis.line = element_blank(),
+             legend.position = "right") +
+       xlab("")
+     
+     assign(paste(project, "plot", sep = "_"),
+            plot, envir = globalenv())
+     
+     assign(paste(project, "df", sep = "_"),
+            df, envir = globalenv())
+     
+     } 
+  )
+```
+
+# Supplementary Figure 1
+
+```{r}
+shared_family.df <- 
+    shared_clusters %>% 
+    filter(Family.x==Family.y, 
+           contigName1 != contigName2) %>% 
+    rowwise() %>% 
+    transmute(pair = paste(sort(c(contigName1, contigName2))[1], 
+                           sort(c(contigName1, contigName2))[2]),
+              Family = Family.x,
+              percent_shared) %>% 
+    distinct() %>%
+    filter(# Family %in% c("Utuviridae", "Hathorviridae", "Aineviridae"),
+           Family != "unclassified_Heliusvirales"
+    )
+
+plot_1 <- 
+    ggplot(
+        shared_family.df,
+        aes(
+            x = Family,
+            y = percent_shared,
+            # color = Family,
+            fill = Family
+        ) 
+    ) +
+    geom_half_boxplot(
+        errorbar.draw = F, 
+        errorbar.length = 0.25,
+        outlier.size = 0.5,
+        alpha = 0.5, 
+        nudge = 0.025
+    ) +
+    geom_half_violin(
+        side = "r",
+        alpha = 0.5, 
+        nudge = 0.025
+    ) +
+    PAdJ_theme() +
+    theme(panel.grid.major.y = element_blank(),
+          legend.position = "") +
+    scale_color_manual(values = kleuren) + 
+    scale_fill_manual(values = kleuren) + 
+    coord_flip()
+
+shared_subfamily.df <- 
+    shared_clusters %>% 
+    filter(Subfamily.x==Subfamily.y, 
+           contigName1 != contigName2,
+           !startsWith(Subfamily.x, "unclassified_Utuviridae"),
+           !startsWith(Family.x, "unclassified")
+    ) %>% 
+    rowwise() %>% 
+    transmute(pair = paste(sort(c(contigName1, contigName2))[1], 
+                           sort(c(contigName1, contigName2))[2]),
+              Subfamily = paste(Family.x, Subfamily.x, sep = "_"),
+              percent_shared) %>% 
+    distinct() 
+
+plot_2 <- 
+    ggplot(
+        shared_subfamily.df,
+        aes(
+            x = Subfamily,
+            y = percent_shared,
+            # color = Subfamily,
+            fill = Subfamily
+        ) 
+    ) +
+    geom_half_boxplot(
+        errorbar.draw = FALSE, 
+        alpha = 0.5, 
+        outlier.size = 0.5,
+        nudge = 0.05
+    ) +
+    geom_half_violin(
+        side = "r",
+        alpha = 0.5, 
+        nudge = 0.05
+    ) +
+    PAdJ_theme() +
+    theme(panel.grid.major.y = element_blank(),
+          legend.position = "") +
+    scale_color_manual(values = kleuren) + 
+    scale_fill_manual(values = kleuren) + 
+    coord_flip()
+```
+
+```{r}
+#| fig-height: 20
+cowplot::plot_grid(plot_1, plot_2, 
+                   ncol = 1, align = "vh", 
+                   rel_heights = c(0.25,1))
+```
+
+# Supplementary Figure 3
+
+```{r}
+rio::import("datatables/pharokka_length_gc_cds_density.tsv") %>% 
+  inner_join(helius_groups, by = c("contig"="contigName")) %>% 
+  mutate(lineage = paste(Family, Subfamily, sep = ";")) %>% 
+  ggboxplot(
+    x = "lineage",
+    y = "gc_perc",
+    ggtheme = PAdJ_theme(),
+    add = "jitter",
+    add.params = list(color = "tomato3"),
+    rotate = T
+  ) +
+  theme(legend.position = "")
+```
+
+# Supplementary Figure 4
+
+```{r}
+iphop_hosts %>% 
+  mutate(Lineage = paste(Family, Subfamily, sep =";"),
+         H_Lineage = paste(H_Phylum, H_Genus, sep = ";")) %>% 
+  group_by(Lineage, H_Lineage) %>% 
+  reframe(genomes = n_distinct(Virus)) %>% 
+  filter(!str_remove(Lineage, ".+;") %in% c("unclassified_Heliusvirales",
+                                            "unclassified_Utuviridae",
+                                            "unclassified_Hathorviridae",
+                                            "unclassified_Aineviridae"),
+         H_Lineage != "unknown;unknown") %>% 
+  ggplot(
+    aes(x = H_Lineage,
+        y = Lineage,
+        fill = genomes)
+  ) +
+  geom_tile() +
+  PAdJ_theme() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) + 
+  scale_fill_viridis()
+```
+
+# Supplementary Figure 5
+
+```{r}
+temperate <- 
+  annotations %>% 
+  inner_join(helius_groups, by = c("contig"="contigName")) %>% 
+  group_by(contig, Family, Subfamily) %>% 
+  reframe(temp = n_distinct(gene[category == "integration and excision"])) %>% 
+  group_by(Family, Subfamily) %>% 
+  reframe(
+    virulent = n_distinct(contig[temp == 0]),
+    temperate = n_distinct(contig[temp > 0]),
+    temp_frac = temperate/(temperate+virulent)
+  ) 
+
+temperate %>% 
+  filter(!Subfamily %in% c("unclassified_Aineviridae",
+                           "unclassified_Utuviridae",
+                           "unclassified_Hathorvirinae",
+                           "unclassified_Heliusvirales")) %>% 
+  mutate(lineage = paste(Family, Subfamily, sep = ";")) %>% 
+  ggdotchart(
+    x = "lineage",
+    y = "temp_frac",
+    ggtheme = PAdJ_theme(),
+    add = "segment",
+    rotate = T
+  ) +
+  geom_hline(yintercept = with(temperate, sum(temperate)/(sum(temperate) +sum(virulent))),
+             linetype = "dashed",
+             color = "tomato3") +
+  theme(legend.position = "") 
+```
+
+# Supplementary Figure 8
+
+## Supplementary Figure 8a
+
+```{r}
+#| warning: false
+
+pasolli %>%
+  mutate(study_name = ifelse(startsWith(study_name, "CM"), 
+                             "PasolliE_2019", 
+                             study_name)) %>%
+  left_join(sampleMetadata[, c(1, 2, 18)], 
+            by = join_by(sample_id, 
+                         study_name)) %>%
+  group_by(sample_id, study_name) %>%
+  summarise(richness = n_distinct(ORFName) / max(number_bases) * 1e9) %>%
+  ungroup() %>%
+  right_join(sampleMetadata, 
+             by = join_by(sample_id, 
+                          study_name)) %>%
+  mutate(richness = ifelse(is.na(richness), 
+                           0, 
+                           richness)) %>%
+  filter(study_name %in% c("Obregon-TitoAJ_2015", 
+                           "RampelliS_2015")) %>%
+  mutate(
+    group = case_when(
+      location %in% c("Bologna", "Norman") ~ "urban",
+      location == "Matses" | country == "TZA" ~ "hunter-gatherer",
+      TRUE ~ "rural"
+    )
+  ) %>%
+  filter(group != "rural") %>%
+  ggboxplot(
+    x = "group",
+    y = "richness",
+    facet.by = "study_name",
+    add = "jitter",
+    color = "group",
+    palette = "aaas",
+    ggtheme = PAdJ_theme(),
+    xlab = "",
+    ylab = "Heliusvirales TerL/person/1B bases"
+  ) +
+  stat_compare_means(comparisons = list(c("hunter-gatherer", "urban")),
+                     label = "p.format") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+## Supplementary Figure 8b
+
+### significance
+
+```{r}
+ancient_ab_lme <- 
+  map_dfr(
+    list(
+      c("ancient", "hunter_gatherer"),
+      c("ancient", "urban"),
+      c("hunter_gatherer", "urban")
+    ) ,
+    function(combo){
+      ancient_abundance.df %>% 
+        filter(lifestyle %in% combo) %>% 
+        nlme::lme(
+          fixed = read_fraction~lifestyle,
+          random = ~1|study_name
+        ) %>% 
+        rstatix::Anova() %>% 
+        rstatix::anova_summary() %>% 
+        mutate(group1 = combo[[1]],
+               group2 = combo[[2]])
+    }
+  ) %>% 
+  mutate(p.adj.lme = p.adjust(p, method = "BH")) %>% 
+  select("group1", "group2", "p.adj.lme")
+
+
+ancient_abundance.df_sign <-
+  ancient_abundance.df %>%
+  rstatix::wilcox_test(read_fraction ~ lifestyle,
+                       p.adjust.method = "BH") %>%
+  rstatix::add_xy_position(fun = "max") %>%
+  select(group1, group2, y.position) %>% 
+  left_join(ancient_ab_lme, by = join_by(group1, group2)) %>% 
+  mutate(p.adj.signif = case_when(
+    p.adj.lme > 0.05 ~ "ns",
+    between(p.adj.lme, 0.01, 0.05) ~ "*",
+    between(p.adj.lme, 0.01, 0.001) ~ "**",
+    between(p.adj.lme, 0.001, 0.0001) ~ "***",
+    p.adj.lme < 0.0001 ~ "****"
+  ),
+  y.position = c(4.5e-4, 5e-4, 5.5e-4)) 
+```
+
+```{r}
+ancient_abundance.df %>% 
+  ggboxplot(
+    y = "read_fraction",
+    x = "lifestyle",
+    ggtheme = PAdJ_theme(),
+    add = "jitter",
+    add.params = list(width = 0.1),
+    ylab = "Heliusvirales TerL relative abundance",
+    xlab = "population",
+    color = "lifestyle",
+    palette = get_palette("jama", 5),
+    width = 0.5
+  ) +
+  stat_pvalue_manual(ancient_abundance.df_sign,
+                     label = "p.adj.lme", 
+                     tip.length = 0.01, 
+                     size = 5, 
+                     hide.ns = F) +
+  theme(panel.grid.major.x = element_blank()) +
+  scale_x_discrete(limits = c("ancient", 
+                              "hunter_gatherer",
+                              "urban")) +
+  scale_y_continuous(labels = scales::label_percent())
+```
+
+## Supplementary Figure 8c
+
+### data and significance
+
+```{r message=FALSE, warning=FALSE}
+source("scripts/ancient_tax.R")
+```
+
+```{r}
+ancient_tax.df %>% 
+  ggboxplot(
+    y = "richness",
+    x = "lifestyle",
+    ggtheme = PAdJ_theme(),
+    add = "jitter",
+    ylab = "taxonomic richness",
+    xlab = "population",
+    color = "lifestyle",
+    palette = get_palette("jama", 4),
+    width = 0.3
+  ) +
+  stat_pvalue_manual(ancient_tax.df_sign,
+                     label = "p.adj.lme", 
+                     tip.length = 0.01, 
+                     size = 5, 
+                     hide.ns = F) +
+  theme(panel.grid.major.x = element_blank()) +
+  scale_x_discrete(limits = c("ancient", 
+                              "hunter_gatherer",
+                              "urban"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
